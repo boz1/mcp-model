@@ -236,6 +236,7 @@ class MCPSimulator:
         self.source_counts_history = []
         self.reward_history = []
         self.proposer_distribution_history = []  # Track distribution of all proposers over time
+        self.region_reward_pairs_history = []  # Track (region_id, reward) pairs per slot for value-capture
 
     def _initialize_proposer_distribution(self):
         """Initialize proposers evenly across regions."""
@@ -312,15 +313,19 @@ class MCPSimulator:
         region_counts = np.zeros(self.n_regions)
         source_counts = np.zeros(self.n_sources)
         slot_rewards = []
+        region_reward_pairs = []  # (region_id, reward) for value-capture computation
 
         for prop, r, I in choices:
             region_counts[r] += 1
             source_counts[I] += 1
-            slot_rewards.append(rewards.get(prop.id, 0.0))
+            reward = rewards.get(prop.id, 0.0)
+            slot_rewards.append(reward)
+            region_reward_pairs.append((r, reward))
 
         self.region_counts_history.append(region_counts)
         self.source_counts_history.append(source_counts)
         self.reward_history.append(slot_rewards)
+        self.region_reward_pairs_history.append(region_reward_pairs)
 
         # Track overall proposer distribution (all proposers, not just selected K)
         proposer_distribution = self._get_proposer_distribution()
