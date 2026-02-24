@@ -16,6 +16,30 @@ from experiment_runner import (
 
 
 # ============================================================================
+# SHARED NETWORK TOPOLOGY
+# One source per region, all with the same value.  K = number of sources so
+# the socially optimal allocation is exactly one proposer per source.
+# ============================================================================
+
+REGIONS = ["West", "CentralWest", "Central", "CentralEast", "East"]
+SOURCE_VALUE = 10.0  # identical across all sources
+
+SOURCES = [(f"Src_{name}", SOURCE_VALUE, i) for i, name in enumerate(REGIONS)]
+K = len(SOURCES)  # concurrent proposers per slot = number of sources
+
+# Params shared by every experiment (override per-experiment as needed)
+BASE = dict(
+    n_regions=len(REGIONS),
+    region_names=REGIONS,
+    sources_config=SOURCES,
+    K=K,
+    n_proposers=80,
+    n_slots=10000,
+    seed=42,
+)
+
+
+# ============================================================================
 # CONFIGURE YOUR EXPERIMENTS HERE
 # ============================================================================
 
@@ -25,95 +49,49 @@ def define_experiments():
 
     experiments = []
 
-    # Experiment 1: Baseline EMA
-    experiments.append(
-        ExperimentConfig(
-            name="baseline_ema",
-            # Regions
-            n_regions=5,
-            region_names=["West", "CentralWest", "Central", "CentralEast", "East"],
-            # Sources: (name, value, home_region)
-            sources_config=[
-                ("LowValue", 8.0, 0),
-                ("MedValue", 12.0, 2),
-                ("HighValue", 18.0, 4),
-            ],
-            # Policy
-            policy_type="EMA",
-            eta=0.12,
-            beta_reg=1.5,
-            beta_src=2.5,
-            cost_c=0.2,
-            # Simulation
-            n_proposers=80,
-            K=8,
-            n_slots=10000,
-            seed=42,
-        )
-    )
+    # -- Equal-split policy experiments --
 
-    # Experiment 2: High exploration EMA
-    experiments.append(
-        ExperimentConfig(
-            name="high_exploration_ema",
-            n_regions=5,
-            region_names=["West", "CentralWest", "Central", "CentralEast", "East"],
-            sources_config=[
-                ("LowValue", 8.0, 0),
-                ("MedValue", 12.0, 2),
-                ("HighValue", 18.0, 4),
-            ],
-            policy_type="EMA",
-            eta=0.12,
-            beta_reg=1.0,  # Lower beta = more exploration
-            beta_src=1.5,
-            cost_c=0.2,
-            n_proposers=80,
-            K=8,
-            n_slots=10000,
-            seed=42,
-        )
-    )
+    # Experiment 1: EMA baseline (equal split)
+    experiments.append(ExperimentConfig(
+        name="ema_equal_baseline",
+        **BASE,
+        policy_type="EMA",
+        eta=0.12,
+        beta_reg=1.5,
+        beta_src=2.5,
+        cost_c=0.2,
+        sharing_policy="equal_split",
+    ))
 
-    # Experiment 3: UCB policy
-    experiments.append(
-        ExperimentConfig(
-            name="ucb_baseline",
-            n_regions=5,
-            region_names=["West", "CentralWest", "Central", "CentralEast", "East"],
-            sources_config=[
-                ("LowValue", 8.0, 0),
-                ("MedValue", 12.0, 2),
-                ("HighValue", 18.0, 4),
-            ],
-            policy_type="UCB",
-            alpha=2.0,
-            n_proposers=80,
-            K=8,
-            n_slots=10000,
-            seed=42,
-        )
-    )
+    # Experiment 2: EMA high exploration (equal split)
+    experiments.append(ExperimentConfig(
+        name="ema_equal_highexplore",
+        **BASE,
+        policy_type="EMA",
+        eta=0.12,
+        beta_reg=1.0,
+        beta_src=1.5,
+        cost_c=0.2,
+        sharing_policy="equal_split",
+    ))
 
-    # Experiment 4: High exploration UCB
-    experiments.append(
-        ExperimentConfig(
-            name="ucb_high_exploration",
-            n_regions=5,
-            region_names=["West", "CentralWest", "Central", "CentralEast", "East"],
-            sources_config=[
-                ("LowValue", 8.0, 0),
-                ("MedValue", 12.0, 2),
-                ("HighValue", 18.0, 4),
-            ],
-            policy_type="UCB",
-            alpha=3.5,  # Higher exploration (vs 2.0 baseline)
-            n_proposers=80,
-            K=8,
-            n_slots=10000,
-            seed=42,
-        )
-    )
+    # Experiment 3: UCB (equal split)
+    experiments.append(ExperimentConfig(
+        name="ucb_equal_baseline",
+        **BASE,
+        policy_type="UCB",
+        alpha=2.0,
+        sharing_policy="equal_split",
+    ))
+
+    # Experiment 4: UCB high exploration (equal split)
+    experiments.append(ExperimentConfig(
+        name="ucb_equal_highexplore",
+        **BASE,
+        policy_type="UCB",
+        alpha=5.0,
+        sharing_policy="equal_split",
+    ))
 
     return experiments
 
@@ -154,7 +132,6 @@ def main():
     print("\n\nGenerating comparison plots...")
     print(f"Plotting {len(results)} experiments: {[r.config.name for r in results]}")
 
-    # Compare key metrics including new HHI, volatility, and value-capture metrics
     compare_experiments(
         results,
         metrics=[
@@ -163,7 +140,8 @@ def main():
             "value_share_hhi",
             "value_share_top1",
             "region_volatility",
-            "reward"
+            "reward",
+            "poa",
         ],
         save_plots=True,
     )

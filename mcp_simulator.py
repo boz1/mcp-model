@@ -197,16 +197,22 @@ class MCPSimulator:
                  distance_matrix: np.ndarray,
                  rank_weights: List[float] = None,
                  K: int = 5,
-                 seed: int = 42):
+                 seed: int = 42,
+                 sharing_policy: str = "rank_weighted"):
         """
         Args:
             regions: List of regions
             sources: List of sources
             proposers: List of proposers (agents)
             distance_matrix: D[r, I] = distance from region r to source I
-            rank_weights: w_j for rank j (default: 2^(-j))
+            rank_weights: w_j for rank j (default: 2^(-j)); only used when sharing_policy="rank_weighted"
             K: Number of concurrent proposers per slot
             seed: Random seed
+            sharing_policy: How source value is split among proposers using the same source.
+                "rank_weighted" — regions are ranked by distance; each region's share is
+                    w_j / sum_ℓ(w_ℓ * x_ℓ), so closer regions earn more per proposer.
+                "equal_split"   — source value is divided equally among all proposers
+                    using that source (1 / total_proposers_on_source per proposer).
         """
         self.regions = regions
         self.sources = sources
@@ -217,6 +223,10 @@ class MCPSimulator:
         self.n_regions = len(regions)
         self.n_sources = len(sources)
         self.n_proposers = len(proposers)
+
+        if sharing_policy not in ("rank_weighted", "equal_split"):
+            raise ValueError(f"sharing_policy must be 'rank_weighted' or 'equal_split', got '{sharing_policy}'")
+        self.sharing_policy = sharing_policy
 
         # Default rank weights: w_j = 2^(-j), j=0,1,2,...
         if rank_weights is None:
@@ -230,11 +240,18 @@ class MCPSimulator:
         # Initialize proposers evenly across regions
         self._initialize_proposer_distribution()
 
+        # Optimal welfare: cover the top min(K, n_sources) sources with 1 proposer each.
+        # Adding a second proposer to a source never increases total welfare (equal or
+        # rank-weighted split — total value distributed equals source.value regardless of count).
+        sorted_values = sorted([s.value for s in self.sources], reverse=True)
+        self.optimal_welfare = sum(sorted_values[:self.K])
+
         # Tracking
         self.slot = 0
         self.region_counts_history = []
         self.source_counts_history = []
         self.reward_history = []
+        self.welfare_history = []           # total welfare (sum of all rewards) per slot
         self.proposer_distribution_history = []  # Track distribution of all proposers over time
         self.region_reward_pairs_history = []  # Track (region_id, reward) pairs per slot for value-capture
 
@@ -277,21 +294,27 @@ class MCPSimulator:
             if not participating:
                 continue
 
-            # Rank regions by distance to source
+            # Compute Ω (per-proposer share) for each participating region
             region_ids = list(participating.keys())
-            distances = [self.distance_matrix[r, source_idx] for r in region_ids]
-            sorted_indices = np.argsort(distances)
-            ranked_regions = [region_ids[i] for i in sorted_indices]
 
-            # Compute Ω for each participating region
-            # Ω_r(j) = w_j / sum_{ℓ} w_ℓ * x_r(ℓ)
-            occupancies = [participating[r] for r in ranked_regions]
-            denominator = sum(self.rank_weights[j] * occupancies[j]
-                            for j in range(len(ranked_regions)))
+            if self.sharing_policy == "rank_weighted":
+                # Rank regions by distance to source (closest = rank 0)
+                distances = [self.distance_matrix[r, source_idx] for r in region_ids]
+                sorted_indices = np.argsort(distances)
+                ranked_regions = [region_ids[i] for i in sorted_indices]
 
-            omega = {}
-            for j, r in enumerate(ranked_regions):
-                omega[r] = self.rank_weights[j] / denominator
+                # Ω_r(j) = w_j / sum_{ℓ} w_ℓ * x_r(ℓ)
+                occupancies = [participating[r] for r in ranked_regions]
+                denominator = sum(self.rank_weights[j] * occupancies[j]
+                                for j in range(len(ranked_regions)))
+                omega = {}
+                for j, r in enumerate(ranked_regions):
+                    omega[r] = self.rank_weights[j] / denominator
+
+            else:  # equal_split
+                # Every proposer using this source gets 1 / total_proposers share
+                total_proposers = sum(participating.values())
+                omega = {r: 1.0 / total_proposers for r in region_ids}
 
             # Compute per-proposer contribution for this source
             source_value = self.sources[source_idx].value
@@ -325,6 +348,7 @@ class MCPSimulator:
         self.region_counts_history.append(region_counts)
         self.source_counts_history.append(source_counts)
         self.reward_history.append(slot_rewards)
+        self.welfare_history.append(sum(slot_rewards))
         self.region_reward_pairs_history.append(region_reward_pairs)
 
         # Track overall proposer distribution (all proposers, not just selected K)
@@ -376,6 +400,15 @@ class MCPSimulator:
         source_entropy = entropy(avg_source_counts)
         proposer_dist_entropy = entropy(avg_proposer_distribution)
 
+        # Price of Anarchy: PoA = optimal / actual  (≥ 1; equals 1 when socially optimal)
+        welfare = np.array(self.welfare_history)
+        poa_history = np.where(welfare > 0, self.optimal_welfare / welfare, np.inf)
+        welfare_efficiency_history = np.where(welfare > 0, welfare / self.optimal_welfare, 0.0)
+        # Tail averages over the last 10% of slots (post-convergence signal)
+        tail_start = max(0, int(0.9 * len(welfare)))
+        tail_poa = float(np.mean(poa_history[tail_start:])) if len(welfare) > 0 else float('inf')
+        tail_efficiency = float(np.mean(welfare_efficiency_history[tail_start:])) if len(welfare) > 0 else 0.0
+
         return {
             'avg_region_counts': avg_region_counts,
             'avg_source_counts': avg_source_counts,
@@ -387,7 +420,14 @@ class MCPSimulator:
             'region_entropy': region_entropy,
             'source_entropy': source_entropy,
             'proposer_dist_entropy': proposer_dist_entropy,
-            'total_slots': len(self.region_counts_history)
+            'total_slots': len(self.region_counts_history),
+            # Welfare / PoA
+            'optimal_welfare': self.optimal_welfare,
+            'mean_welfare': float(np.mean(welfare)),
+            'tail_poa': tail_poa,
+            'tail_welfare_efficiency': tail_efficiency,
+            'poa_history': poa_history,
+            'welfare_efficiency_history': welfare_efficiency_history,
         }
 
 

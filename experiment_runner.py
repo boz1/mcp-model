@@ -66,6 +66,11 @@ class ExperimentConfig:
     n_slots: int = 10000
     seed: int = 42
 
+    # Sharing policy: how source value is split among proposers using the same source
+    # "rank_weighted" — closer regions earn more per proposer (default)
+    # "equal_split"   — every proposer on the source earns 1/N regardless of distance
+    sharing_policy: str = "rank_weighted"
+
     # Output configuration
     save_results: bool = True
     results_dir: str = "experiment_results"
@@ -182,6 +187,7 @@ class ExperimentResult:
         self.proposer_distribution = np.array(simulator.proposer_distribution_history)
         self.rewards = [np.mean(r) if r else 0 for r in simulator.reward_history]
         self.region_reward_pairs = simulator.region_reward_pairs_history
+        self.welfare_history = np.array(simulator.welfare_history)
 
         # Compute time-series metrics
         self._compute_time_series_metrics()
@@ -255,6 +261,9 @@ class ExperimentResult:
         self.region_volatility_over_time = []  # L1 change in active region selection
         self.proposer_dist_volatility_over_time = []  # L1 change in population distribution
         self.value_share_volatility_over_time = []  # L1 change in value shares
+
+        # D) Price of Anarchy: optimal_welfare / actual_welfare per slot (≥ 1)
+        self.poa_over_time = []
 
         # Previous distributions for computing volatility
         prev_region_shares = None
@@ -334,6 +343,10 @@ class ExperimentResult:
             prev_region_shares = current_region_shares
             prev_proposer_shares = current_proposer_shares
             prev_value_shares = value_shares
+
+            # === D) Price of Anarchy ===
+            w = self.welfare_history[t]
+            self.poa_over_time.append(self.stats['optimal_welfare'] / w if w > 0 else float('inf'))
 
         # Convert lists to numpy arrays for easier manipulation
         self.value_capture_by_region = np.array(self.value_capture_by_region)
@@ -547,7 +560,8 @@ def run_experiment(config: ExperimentConfig, verbose: bool = True) -> Experiment
         proposers.append(Proposer(i, policy))
 
     # Create and run simulator
-    sim = MCPSimulator(regions, sources, proposers, distance_matrix, K=config.K, seed=config.seed)
+    sim = MCPSimulator(regions, sources, proposers, distance_matrix,
+                       K=config.K, seed=config.seed, sharing_policy=config.sharing_policy)
 
     if verbose:
         print(f"\nRunning simulation...")
@@ -626,17 +640,17 @@ def compare_experiments(results: List[ExperimentResult],
 
     if metrics is None:
         metrics = ['proposer_dist_gini', 'proposer_dist_entropy', 'proposer_dist_hhi',
-                   'region_volatility', 'value_share_hhi', 'reward']
+                   'region_volatility', 'value_share_hhi', 'reward', 'poa']
 
     print(f"\n[DEBUG] compare_experiments called with {len(results)} results:")
     for i, r in enumerate(results):
         print(f"  [{i}] {r.config.name} ({r.config.policy_type})")
 
     n_metrics = len(metrics)
-    # Use 2x3 grid layout
-    n_rows = 2
+    # Use 3x3 grid layout (supports up to 9 metrics; extras are hidden)
+    n_rows = 3
     n_cols = 3
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(20, 10))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(20, 15))
     axes = axes.flatten()  # Flatten to 1D array for easier indexing
 
     # Create descriptive title with experiment names
@@ -711,15 +725,21 @@ def compare_experiments(results: List[ExperimentResult],
             elif metric == 'reward':
                 data = result.rewards
                 ylabel = 'Average Reward per Proposer'
+            elif metric == 'poa':
+                raw = np.array(result.poa_over_time, dtype=float)
+                # Replace inf with NaN so the convolution isn't polluted
+                data = np.where(np.isfinite(raw), raw, np.nan)
+                ylabel = 'Price of Anarchy  (optimal / actual,  ≥ 1)'
             else:
                 print(f"Unknown metric: {metric}")
                 continue
 
-            # Smooth with moving average
+            # Smooth with moving average (NaN-safe for PoA)
             window = min(100, len(data) // 10)
             if window > 1:
-                smoothed = np.convolve(data, np.ones(window)/window, mode='valid')
-                slots = np.arange(window-1, len(data))
+                smoothed = np.convolve(np.nan_to_num(data, nan=1.0),
+                                       np.ones(window) / window, mode='valid')
+                slots = np.arange(window - 1, len(data))
             else:
                 smoothed = data
                 slots = np.arange(len(data))
@@ -730,6 +750,12 @@ def compare_experiments(results: List[ExperimentResult],
             print(f"    Plotting {result.config.name}: {len(smoothed)} points, color idx {result_idx}, style {linestyle}")
             ax.plot(slots, smoothed, label=label, linewidth=2.5,
                    color=colors[result_idx], linestyle=linestyle, alpha=0.9)
+
+        # Reference line at 1 for PoA (social optimum)
+        if metric == 'poa':
+            ax.axhline(y=1.0, color='green', linestyle='--', linewidth=1.5,
+                       alpha=0.7, label='Social optimum')
+            ax.set_ylim(bottom=0.9)
 
         ax.set_xlabel('Slot', fontsize=11)
         ax.set_ylabel(ylabel, fontsize=11)
@@ -779,10 +805,10 @@ def plot_experiment_details(result: ExperimentResult, save_plots: bool = True):
     print(f"\n[DEBUG] Plotting details for experiment: {result.config.name}")
 
     # Create figure with multiple subplots
-    fig = plt.figure(figsize=(20, 14))
+    fig = plt.figure(figsize=(20, 18))
 
-    # Define grid: 3 rows, 3 columns
-    gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.3)
+    # Define grid: 4 rows, 3 columns (row 3 reserved for PoA spanning full width)
+    gs = fig.add_gridspec(4, 3, hspace=0.35, wspace=0.3)
 
     slots = np.arange(len(result.region_counts))
 
@@ -974,6 +1000,42 @@ def plot_experiment_details(result: ExperimentResult, save_plots: bool = True):
     ax9.set_title('Volatility (Distribution Churn) Over Time', fontsize=11, fontweight='bold')
     ax9.legend(loc='best', fontsize=9, framealpha=0.9)
     ax9.grid(True, alpha=0.3)
+
+    # 10. Price of Anarchy Over Time (full-width bottom row)
+    ax10 = fig.add_subplot(gs[3, :])
+
+    poa = np.array(result.poa_over_time, dtype=float)
+    # Cap inf values for plotting (slots where welfare=0)
+    finite_mask = np.isfinite(poa)
+    poa_plot = np.where(finite_mask, poa, np.nan)
+
+    if window > 1 and np.any(finite_mask):
+        # Smooth only over finite values; fill NaN with edge values first
+        poa_filled = poa_plot.copy()
+        # Forward-fill NaNs so convolution is cleaner
+        for i in range(1, len(poa_filled)):
+            if np.isnan(poa_filled[i]):
+                poa_filled[i] = poa_filled[i - 1]
+        smooth_poa = np.convolve(np.nan_to_num(poa_filled, nan=1.0),
+                                 np.ones(window) / window, mode='valid')
+    else:
+        smooth_poa = poa_plot
+        slots_smooth = slots
+
+    ax10.plot(slots_smooth, smooth_poa, linewidth=2, color='steelblue', alpha=0.9, label='PoA (smoothed)')
+    ax10.axhline(y=1.0, color='green', linestyle='--', linewidth=1.5, alpha=0.8, label='Social optimum (PoA = 1)')
+    optimal_w = result.stats['optimal_welfare']
+    ax10.set_xlabel('Slot', fontsize=10)
+    ax10.set_ylabel('Price of Anarchy  (optimal / actual)', fontsize=10)
+    ax10.set_title(
+        f'Price of Anarchy Over Time  |  Optimal welfare = {optimal_w:.2f}  |  '
+        f'Tail PoA = {result.stats["tail_poa"]:.3f}',
+        fontsize=11, fontweight='bold'
+    )
+    ax10.legend(loc='upper right', fontsize=9, framealpha=0.9)
+    ax10.grid(True, alpha=0.3)
+    # PoA ≥ 1 by definition; set sensible y-floor
+    ax10.set_ylim(bottom=max(0.9, np.nanmin(smooth_poa) * 0.95) if len(smooth_poa) > 0 else 0.9)
 
     # Main title
     policy_info = result.config.policy_type
