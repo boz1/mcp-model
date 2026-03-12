@@ -2,7 +2,7 @@
 import numpy as np
 from typing import List
 
-from sim.config import ExperimentConfig, create_scenario_from_config
+from sim.config import ExperimentConfig, create_scenario_from_config, get_seeds
 from analysis.result import ExperimentResult
 from analysis.poa import compute_poa_stats
 from sim.simulator import (
@@ -81,30 +81,10 @@ def get_preset_config(preset_name: str) -> ExperimentConfig:
     return presets[preset_name]
 
 
-def run_experiment(config: ExperimentConfig, verbose: bool = True,
-                   compute_poa: bool = False, poa_method: str = 'brute_force') -> ExperimentResult:
-    """Run a single experiment with given configuration."""
-
-    if verbose:
-        print(f"\n{'='*70}")
-        print(f"Running Experiment: {config.name}")
-        print(f"{'='*70}")
-        print(f"Policy: {config.policy_type}")
-        print(f"Regions: {config.n_regions}, Sources: {len(config.sources_config)}")
-        print(f"Builders: {config.n_builders}, Slots: {config.n_slots}, Delta: {config.delta}")
-
-    regions, sources, latency_mean, latency_std = create_scenario_from_config(config)
-
-    if verbose:
-        print(f"\nSources: {[(s.name, f'lambda={s.lambda_rate}', f'starting region={s.region}') for s in sources]}")
-        print(f"\nLatency mean matrix:")
-        print(latency_mean, "\n")
-
-    initial_belief = sum(
-        s.lambda_rate * config.delta * np.exp(s.mu_val + s.sigma_val ** 2 / 2)
-        for s in sources
-    )
-
+def _run_single(config: ExperimentConfig, seed: int,
+                regions, sources, latency_mean, latency_std,
+                initial_belief) -> ExperimentResult:
+    """Run one simulation instance with the given seed and return its result."""
     builders = []
     for i in range(config.n_builders):
         if config.policy_type == "EMA":
@@ -119,7 +99,6 @@ def run_experiment(config: ExperimentConfig, verbose: bool = True,
             policy = UCBPolicy(config.n_regions, alpha=config.alpha, initial_belief=initial_belief)
         else:
             raise ValueError(f"Unknown policy: {config.policy_type}")
-
         builders.append(Builder(i, policy))
 
     sim = LocationGamesSimulator(
@@ -130,17 +109,53 @@ def run_experiment(config: ExperimentConfig, verbose: bool = True,
         propagation_model=LatencyPropagationModel(latency_mean, latency_std),
         sharing_rule=EqualSplitSharingRule(),
         delta=config.delta,
-        seed=config.seed,
+        seed=seed,
+    )
+    sim.run(config.n_slots)
+    result = ExperimentResult(config, sim)
+    result.seed = seed
+    return result
+
+
+def run_experiment(config: ExperimentConfig, verbose: bool = True,
+                   compute_poa: bool = False, poa_method: str = 'brute_force') -> ExperimentResult:
+    """Run experiment over n_runs seeds; return the worst-welfare (worst equilibrium) result."""
+
+    if verbose:
+        print(f"\n{'='*70}")
+        print(f"Running Experiment: {config.name}")
+        print(f"{'='*70}")
+        print(f"Policy: {config.policy_type}")
+        print(f"Regions: {config.n_regions}, Sources: {len(config.sources_config)}")
+        print(f"Builders: {config.n_builders}, Slots: {config.n_slots}, Delta: {config.delta}, Runs: {config.n_runs}")
+
+    regions, sources, latency_mean, latency_std = create_scenario_from_config(config)
+
+    if verbose:
+        print(f"\nSources: {[(s.name, f'lambda={s.lambda_rate}', f'starting region={s.region}') for s in sources]}")
+        print(f"\nLatency mean matrix:")
+        print(latency_mean, "\n")
+
+    initial_belief = sum(
+        s.lambda_rate * config.delta * np.exp(s.mu_val + s.sigma_val ** 2 / 2)
+        for s in sources
     )
 
+    seeds = get_seeds(config.n_runs)
+
+    results = []
+    for i, seed in enumerate(seeds):
+        if verbose and config.n_runs > 1:
+            print(f"Run {i+1}/{config.n_runs} (seed={seed})...")
+        results.append(_run_single(config, seed, regions, sources, latency_mean, latency_std, initial_belief))
+
+    # Pick the worst equilibrium
+    result = min(results, key=lambda r: r.stats['mean_welfare'])
+
     if verbose:
-        print(f"\nRunning simulation...")
-
-    sim.run(config.n_slots)
-
-    result = ExperimentResult(config, sim)
-
-    if verbose:
+        if config.n_runs > 1:
+            print(f"\nWorst-welfare run: seed={result.seed} "
+                  f"(welfare={result.stats['mean_welfare']:.4f})")
         print_results(result, regions, sources)
 
     if compute_poa:

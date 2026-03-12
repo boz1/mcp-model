@@ -6,6 +6,13 @@ from typing import List, Optional
 from sim.datasets import gcp_sources, load_gcp, subregion
 from sim.simulator import Region, Source
 
+PRIMARY_SEED = 0
+
+def get_seeds(n_runs: int) -> list:
+    """Derive a reproducible list of seeds from PRIMARY_SEED."""
+    return np.random.default_rng(PRIMARY_SEED).integers(0, 2**32, n_runs).tolist()
+
+
 @dataclass
 class ExperimentConfig:
     """All experiment parameters in one place."""
@@ -40,7 +47,7 @@ class ExperimentConfig:
     n_builders: int = 8
     n_slots: int = 10000
     delta: float = 12.0
-    seed: int = 42
+    n_runs: int = 1
 
     # Output configuration
     save_results: bool = True
@@ -109,7 +116,7 @@ def load_config(path) -> ExperimentConfig:
         n_builders=sim["n_builders"],
         n_slots=sim["n_slots"],
         delta=sim.get("delta", 12.0),
-        seed=sim.get("seed", 42),
+        n_runs=sim.get("n_runs", 1),
         policy_type=pol["type"],
         eta=pol.get("eta", 0.12),
         beta_reg=pol.get("beta_reg", 1.5),

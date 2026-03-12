@@ -16,7 +16,7 @@ simulation:
   n_builders: 5
   n_slots: 5000
   delta: 4.0
-  seed: 42
+  n_runs: 1
 
 policy:
   type: EMA
